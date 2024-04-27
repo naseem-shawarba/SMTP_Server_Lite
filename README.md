@@ -21,5 +21,9 @@ SMTP Server Lite is a lightweight implementation of an SMTP (Simple Mail Transfe
 
 ## Usage
 1. Run the SMTP Server Lite.
-2. Use a compatible SMTP client to send test emails.
+2. Use a compatible SMTP client to send test emails. Alternatively, you can use Netcat with the following command:
+`netcat localhost <portnumber>`
+
+Make sure to end each command with a carriage return (CRLF). To insert a carriage return, press Ctrl+V followed by Ctrl+M. The carriage return will appear as (^M).
+
 3. Check the specified directory for stored emails.
