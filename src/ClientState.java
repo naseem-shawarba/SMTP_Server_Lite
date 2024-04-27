@@ -1,4 +1,7 @@
+import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 
 import java.util.List;
@@ -10,70 +13,31 @@ public class ClientState {
 
     boolean commandSent = true;  // the client send data(the message in the email) or commands : in the beginning the client sends me the helo command , thats why in the beginning commandsent is true
     // if DATA command was send : then commandSent will be changed to false :
+    boolean isDataOnTheWay = false;
 
-    String reversePath = "" ;
+    SocketChannel clientSock;
+
+    String reversePath;
+    //String forwardPath ;
     List<String> forwardPath = new ArrayList<String>();
-    String mailData = "";
-    //StringBuilder mailData = new StringBuilder("");
-    boolean heloSent = false;
-    boolean closeChannel = false;
-    boolean helpsent = false;
-    int message_id ;
+    String mailData = ""; // Buffer f�r die Mail-Daten
+    int progress = 0; // 0..5 -> 0 - Verbindung aufgebaut; 1 - HELO; 2 - MAIL FROM; 3 - RCPT TO; 4 - DATA; 5 - QUIT
 
 
-
-    ClientState(){
-
+    ClientState(SocketChannel clientSock) throws Exception{
+        this.clientSock = clientSock;
         reply(220);
     }
 
 
-    public void reply(double replynumber) {
+    public void reply(int replynumber) throws Exception{
         replyBuffer.clear();
-
-        String replymeaning;
-        replymeaning = ReplyCode.getInstance().listreplies.get(replynumber);
-        replyBuffer.put(String.format("%d %s\r\n", (int) Math.floor(replynumber), replymeaning).getBytes(SMTPServer.messageCharset));
-
-        if(helpsent){
-            replymeaning = ReplyCode.getInstance().listreplies.get(214);
-            replyBuffer.put(String.format("%d %s\r\n", (int) Math.floor(214), replymeaning).getBytes(SMTPServer.messageCharset));
-        }
-
-
-
-
-
-        if(replynumber == 214.0){
-            helpsent = true;
-        }
-
-
+        String replymeaning = ReplyCode.getInstance().listreplies.get(replynumber) ;
+        replyBuffer.put(String.format("%d %s\r\n",replynumber, replymeaning).getBytes(SMTPServer.messageCharset));
         replyBuffer.flip();
+
+
     }
 
 
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

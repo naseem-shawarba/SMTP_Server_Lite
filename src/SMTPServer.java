@@ -1,327 +1,315 @@
-
-
-import java.io.File;
-import java.io.FileOutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.*;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
-import java.nio.charset.UnsupportedCharsetException;
+import java.sql.Timestamp;
 import java.util.Iterator;
 import java.util.Random;
 import java.util.Set;
-import java.io.IOException;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
+import java.io.*;
 
 public class SMTPServer {
 
     public static Charset messageCharset = Charset.forName("US-ASCII");
     public static CharsetDecoder decoder = messageCharset.newDecoder();
-    public static Random random = new Random();
+    ByteBuffer readBuffer = ByteBuffer.allocate(1024);
+    private Selector selector;
+    ServerSocketChannel servSock;
+    public static boolean help = false;
 
-    public static void runServer(int portnumber) throws IOException{
-        ByteBuffer readBuffer = ByteBuffer.allocate(1024);
-        
-
-
-        Selector selector = Selector.open();
-        ServerSocketChannel servSock = ServerSocketChannel.open();
+    // Constructor with initialization of the Server Socket Channel:
+    public SMTPServer(int portnumber) throws Exception {
+        selector = Selector.open();
+        servSock = ServerSocketChannel.open();
         servSock.configureBlocking(false);
         servSock.socket().bind(new InetSocketAddress(portnumber));
         servSock.register(selector, SelectionKey.OP_ACCEPT);
+    }
 
-        while(true){
+    public void runServer() throws Exception {
 
-
-            if(selector.select() == 0){
+        while (true) {
+            if (selector.select() == 0) {
                 continue;
             }
             Set<SelectionKey> selectedKeys = selector.selectedKeys();
             Iterator<SelectionKey> iter = selectedKeys.iterator();
 
-            while(iter.hasNext()){ SelectionKey key = iter.next();
-                iter.remove();
-                readBuffer.clear();
+            while (iter.hasNext()) {
+                SelectionKey key = iter.next();
 
-                if(key.isAcceptable()){
+                // Check if the key's channel is ready to accept a new connection
+                if (key.isAcceptable()) {
                     ServerSocketChannel sock = (ServerSocketChannel) key.channel();
-                    SocketChannel client = sock.accept();
-                    client.configureBlocking(false);
-                    client.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE ,new ClientState());
-
-
-
-
-
-
-
+                    SocketChannel clientSock = sock.accept();
+                    clientSock.configureBlocking(false);
+                    ClientState clientState = new ClientState(clientSock);
+                    clientSock.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, clientState);
                 }
-                if(key.isReadable()){
 
-                    SocketChannel channel =(SocketChannel) key.channel();
+                // Check if the key's channel is ready for reading
+                if (key.isReadable()) {
+                    SocketChannel channel = (SocketChannel) key.channel();
                     ClientState client = (ClientState) key.attachment();
                     readBuffer.clear();
-                    try{
-                        channel.read(readBuffer);
-                    }catch (Exception e){
 
-                    }
-                    //int readBytes =channel.read(readBuffer);
-                    /*if (readBytes == -1){
-                        channel.close();
-                        continue;
-                    }*/
-
+                    // Read data from the channel into the buffer
+                    int readBytes = channel.read(readBuffer);
                     readBuffer.flip();
 
-                    //further processing of the data or command
-                    String messageRecieved = decoder.decode(readBuffer).toString();
+                    // Decode the received message
+                    String messageReceived = decoder.decode(readBuffer).toString();
 
-                    int num= 3;
-                    if(client.commandSent){//command was sent from the client
-                        String command = messageRecieved.substring(0,messageRecieved.length()-2);
-                        handleCommand(client , command);
-
-
-                    }else{//data was sent from the client
-                        client.mailData += messageRecieved ;
-
-                        //String str =client.mailData ;
-
-                        if(messageTerminated(client.mailData)){
-                            client.commandSent = true;
-                            client.mailData = client.mailData.substring(0,client.mailData.length()-5); // delete "\r\n.\r\n" from the message
-                            saveMessage(client );
-                            client.reply(250.1);
-                        }
-
+                    // Determine whether the message is a command or data
+                    if (client.commandSent) {
+                        handleCommand(client, messageReceived, readBytes);
+                    } else {
+                        saveMessage(client, messageReceived);
                     }
 
-
+                    // If there is no more data expected from the client or if help is requested,
+                    // set interest in writing
+                    if (!client.isDataOnTheWay || help) {
+                        key.interestOps(SelectionKey.OP_WRITE);
+                    }
                 }
-                if(key.isWritable()){
-                    SocketChannel channel =(SocketChannel) key.channel();
+
+                // Check if the key's channel is ready for writing
+                if (key.isWritable()) {
+                    SocketChannel channel = (SocketChannel) key.channel();
                     ClientState client = (ClientState) key.attachment();
 
-                    /*if( client.replyBuffer.limit() == client.replyBuffer.position()){
-                        channel.close();
-                        System.out.println("exit loop");
-                        System.out.println(client.replyBuffer.position());
-                        System.out.println(client.replyBuffer.limit());
-                        continue;
-                    }*/
-                    int writeBytes = channel.write(client.replyBuffer);
-                    if( writeBytes == -1){
-                        channel.close();
-                        continue;
-                    }
-                    //client.replyBuffer.clear();
-                    //channel.write(client.replyBuffer);
+                    // Write data from the client's reply buffer to the channel
+                    channel.write(client.replyBuffer);
+                    key.interestOps(SelectionKey.OP_READ);
 
-
-                    if(client.closeChannel){
+                    // If the client's progress reaches a certain point, cancel the key and close
+                    // the channel
+                    if (client.progress == 6) {
+                        key.cancel();
                         channel.close();
                     }
-
-
                 }
 
-
-
-
-
+                // Remove the current key from the iterator
+                iter.remove();
+                readBuffer.clear();
             }
         }
     }
 
-    private static boolean messageTerminated(String message) {
-        String mes = message.toString();
-        if (message.length()<5){
-            return false;
-        }
+    private static void handleCommand(ClientState client, String messageReceived, int readBytes) throws Exception {
 
-        if(mes.indexOf("\r\n.\r\n",message.length()-5) == message.length()-5){
-            return true;
-        }
-        return false ;
+        // Check if the received message is empty or too short
+        if (messageReceived.length() == 0 || messageReceived.length() < 4)
+            return;
 
+        // Extract the command from the received message and convert it to uppercase
+        String command = messageReceived.substring(0, 4).toUpperCase();
+        System.out.println(messageReceived); // Print the received message
 
-    }
-
-    private static void handleCommand(ClientState client, String messageRecieved) {
-
-        String commandCode = messageRecieved.substring(0,4);
-        commandCode= commandCode.toUpperCase();
-
-
-        if (commandCode.equals("HELO")){
-            //TODO
-            client.heloSent = true;
-            client.reply(250.2);
-            
-        } else if (commandCode.equals("MAIL")){ //data should be extracted and saved in client buffers ; writebuffer should be filles with the corresponding message
-            //TODO
-            // clear state of all buffers
-            if (!client.heloSent){
+        // Perform actions based on the command
+        if (command.equals("HELO")) {
+            // HELO command
+            if (client.progress != 0) {
+                // Already in progress, send error reply
                 client.reply(503);
                 return;
             }
-            client.reversePath = "";
-            client.forwardPath.clear();
-            client.mailData = "";
+            // Prepare and send the reply
+            client.replyBuffer.clear();
+            String myHost = InetAddress.getLocalHost().getCanonicalHostName();
+            client.replyBuffer.put(String.format("%d %s\r\n", 250, myHost).getBytes(SMTPServer.messageCharset));
+            client.replyBuffer.flip();
+            client.progress = 1; // Update progress
 
-
-            String patternString1 = "MAIL FROM: (.*@.+)";
-            Pattern pattern = Pattern.compile(patternString1);
-            Matcher matcher = pattern.matcher(messageRecieved);
-            while(matcher.find()) {
-                 client.reversePath += matcher.group(1);
-            }
-            String dtr = client.reversePath;
-
-            client.reply(250.1);
-
-
-
-        }else if (commandCode.equals("RCPT")){
-            //TODO
-            if (!client.heloSent || client.reversePath.isEmpty()){
+        } else if (command.equals("MAIL")) {
+            // MAIL command
+            if (client.progress != 1) {
+                // Incorrect progress, send error reply
                 client.reply(503);
                 return;
             }
-
-
-
-            String patternString1 = "RCPT TO: (.*@.+)";
-            Pattern pattern = Pattern.compile(patternString1);
-            Matcher matcher = pattern.matcher(messageRecieved);
-            while(matcher.find()) {
-                client.forwardPath.add(matcher.group(1));
+            // Check if the command format is correct
+            if (!messageReceived.toUpperCase().startsWith("MAIL FROM:")) {
+                client.reply(502);
+                return;
             }
+            // Extract reverse path and prepare reply
+            int k = (messageReceived.charAt(readBytes - 2) != '\r') ? 1 : 0; // Adjustment for netcat
+            client.reversePath = messageReceived.substring(10, readBytes - 2 + k).replaceAll("\\s", "");
+            client.replyBuffer.clear();
+            client.replyBuffer.put(String.format("250 OK\r\n").getBytes(SMTPServer.messageCharset));
+            client.replyBuffer.flip();
+            client.progress = 2; // Update progress
 
-
-            client.reply(250.1);
-
-
-
-        } else if (commandCode.equals("DATA")){
-            //
-            if (!client.heloSent || client.reversePath.isEmpty() || client.forwardPath.isEmpty()){
+        } else if (command.equals("RCPT")) {
+            // RCPT command
+            if (client.progress < 2 || client.progress > 3) {
+                // Incorrect progress, send error reply
                 client.reply(503);
                 return;
             }
-            client.commandSent = false ;
-            client.reply(354);
+            // Check if the command format is correct
+            if (!messageReceived.toUpperCase().startsWith("RCPT TO:")) {
+                client.reply(502);
+                return;
+            }
+            // Extract forward path and prepare reply
+            int k = (messageReceived.charAt(readBytes - 2) != '\r') ? 1 : 0; // Adjustment for netcat
+            client.forwardPath.add(messageReceived.substring(8, readBytes - 2 + k).replaceAll("\\s", ""));
+            client.replyBuffer.clear();
+            client.replyBuffer.put(String.format("250 OK\r\n").getBytes(SMTPServer.messageCharset));
+            client.replyBuffer.flip();
+            client.progress = 3; // Update progress
 
+        } else if (command.equals("DATA")) {
+            // DATA command
+            if (client.progress != 3) {
+                // Incorrect progress, send error reply
+                client.reply(503);
+                return;
+            }
+            // Prepare for data reception
+            client.commandSent = false;
+            client.reply(354); // Send intermediate reply
 
+        } else if (command.equals("QUIT")) {
+            // QUIT command
+            System.out.println("OK");
+            client.reply(221); // Send reply
+            client.progress = 6; // Update progress
 
-        }else if (commandCode.equals("QUIT")){
-            //TODO
-            client.closeChannel = true;
-            client.reply(221);
+        } else if (command.equals("HELP")) {
+            // HELP command
+            String reply;
+            if (messageReceived.length() == 6 || messageReceived.length() == 5) {
+                // Reply without command
+                reply = ReplyCode.getInstance().helpRepliesWOCommand.get(client.progress) + "\r\n";
+            } else {
+                // Reply with specific command help
+                String helpCommand = messageReceived.substring(4, readBytes - 2).toUpperCase().replaceAll("\\s", "");
+                if (ReplyCode.getInstance().helpRepliesWithCommand.get(helpCommand) == null) {
+                    reply = "214 " + ReplyCode.getInstance().listreplies.get(214) + "\r\n" + "bad command\r\n";
+                } else {
+                    reply = ReplyCode.getInstance().helpRepliesWithCommand.get(helpCommand) + "\r\n";
+                }
+            }
+            // Prepare and send reply
+            client.replyBuffer.clear();
+            client.replyBuffer.put(reply.getBytes(SMTPServer.messageCharset));
+            client.replyBuffer.flip();
 
-
-
-        }else if (commandCode.equals("HELP")){
-            //TODO
-
-
-            client.reply(214);
-
-
-
-        }else if (commandCode.equals("RSET")|| commandCode.equals("NOOP")){
-            // sind nicht Teil der Hausaufgabe
-            client.reply(502);
-
-        }else{
+        } else {
+            // Unknown command, send error reply
             client.reply(500);
         }
     }
-    private static void saveMessage(ClientState client) throws IOException { // creat files for the RCPT and save the message for each RCPT
-        //TODO
-        System.out.println(client.reversePath);
-        for (String msg:client.forwardPath){
-            System.out.println(msg);
-        }
-        System.out.println(client.mailData);
 
-        //TODO
-        client.message_id = random.nextInt(10000); //this will give an random number from 0 to 9999
+    private static void saveMessage(ClientState client, String messageReceived) {
 
-        for(String reciever : client.forwardPath) {
-            String recieverFolderPath = String.format("/home/naseem/Desktop/SMTPServer_database/%s",reciever );
-            File recieverFolder = new File(String.format(recieverFolderPath));
-            recieverFolder.mkdirs();
+        System.out.println(messageReceived); // Print received message
 
-            String recievedMessageFilePath = String.format("%s/%s-%d.txt",recieverFolderPath,client.reversePath,client.message_id );
-            File recievedMessageFile = new File(recievedMessageFilePath);
-            recievedMessageFile.createNewFile();
-            FileOutputStream f = new FileOutputStream(recievedMessageFilePath);
-            FileChannel ch = f.getChannel();
+        // Check if the message is a HELP command
+        if (messageReceived.toUpperCase().equals("HELP\r\n")) {
+            help = true; // Set help flag to true
 
+            try {
+                // Get help reply based on client progress
+                String reply = ReplyCode.getInstance().helpRepliesWOCommand.get(client.progress + 1) + "\r\n";
 
-            ByteBuffer saveBuffer = ByteBuffer.allocate(1024);
-            saveBuffer.put(client.mailData.getBytes(messageCharset));
-            saveBuffer.flip();
-            ch.write(saveBuffer);
+                // Prepare reply buffer
+                client.replyBuffer.clear();
+                client.replyBuffer.put(reply.getBytes(SMTPServer.messageCharset));
+                client.replyBuffer.flip();
+            } catch (Exception e) {
+                // Handle exception (currently empty)
+            }
 
-
-
-
-
-
-
-
-            ch.close();
-            //System.out.println(recievedMessageFile.exists());
-
+            return; // Exit method
         }
 
+        // Append received message to client's mail data
+        client.mailData += messageReceived;
+
+        int lenMess = client.mailData.length(); 
+
+        // Check if mail data ends with "\r\n.\r\n"
+        if (lenMess >= 5) {
+            String endOfMessage = client.mailData.substring(lenMess - 5, lenMess);
+            if (!endOfMessage.equals("\r\n.\r\n")) {
+                // If message is not complete, set data on the way flag and return
+                client.isDataOnTheWay = true;
+                return;
+            }
+
+            // Remove "\r\n.\r\n" from mail data if message is complete
+            client.mailData = client.mailData.substring(0, client.mailData.length() - 5);
+        } else if (messageReceived.equals("\r\n.\r\n")) {
+            // If message is only "\r\n.\r\n", remove it from mail data
+            client.mailData = client.mailData.substring(0, client.mailData.length() - 5);
+        } else {
+            // If message is not complete, set data on the way flag and return
+            client.isDataOnTheWay = true;
+            return;
+        }
+
+        // If message is complete, process it
+        client.isDataOnTheWay = false; // Reset data on the way flag
+        client.commandSent = true; // Set command sent flag
+        client.progress = 5; // Update client progress
+
+        // Save message for each recipient
+        for (String rcpt : client.forwardPath) {
+            String orderName = "./SMTPServer_database/" + rcpt; // Directory for recipient
+            File file = new File(orderName); // Create directory if not exists
+            if (!file.isDirectory()) {
+                file.mkdirs();
+            }
+
+            String filename = orderName + "/" + client.reversePath + "_" + ((new Random()).nextInt(10000)) + ".txt"; // Filename  for message
+
+            try {
+                // Write message to file
+                FileWriter myWriter = new FileWriter(filename);
+                Timestamp time = new Timestamp(System.currentTimeMillis()); // Get current timestamp
+                myWriter.write(time + "\n\n" + client.mailData); // Write timestamp and message
+                myWriter.close();
+            } catch (IOException e) {
+                // Handle file writing exception
+                System.out.println("Couldn't write file! Stopping...");
+            }
+
+            try {
+                // Send reply code 250
+                client.reply(250);
+            } catch (Exception e) {
+                // Handle reply exception (currently empty)
+            }
+        }
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    public static void main(String[] args) throws IOException {
+    // Main method to start the server
+    public static void main(String[] args) throws Exception {
         int portNumber = 0;
         if (args.length != 1) {
-            System.err.println("Usage: java SMTPServer.class <port>");
+            System.err.println("Usage: java SMTPServer <port>");
             System.exit(1);
-        }
-        else{
+        } else {
             try {
                 portNumber = Integer.parseInt(args[0]);
+                System.out.println("Server started on port: " + portNumber); // Notify server startup with port
             } catch (NumberFormatException e) {
-                //System.err.println("Argument : " + args[0] + " must be an integer.");
+                System.err.println("Invalid port number"); // Error message for invalid port number
                 System.exit(1);
             }
         }
-
-        runServer(portNumber);
-
+        SMTPServer server = new SMTPServer(portNumber);
+        server.runServer();
     }
 }
